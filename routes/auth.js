@@ -3,11 +3,23 @@ import { supabase } from '../supabaseClient.js';
 
 const router = express.Router();
 
+// We use mobile number as the login identifier, but Supabase's Phone auth
+// provider requires a paid SMS provider (Twilio) to even be enabled, even
+// though we never send an OTP. To avoid that dependency entirely, we store
+// each user under a synthetic email derived from their mobile number and
+// use Supabase's normal EMAIL auth under the hood. Users never see this —
+// they only ever type their mobile number.
+function mobileToSyntheticEmail(mobileNumber) {
+  const digitsOnly = mobileNumber.replace(/[^\d]/g, ''); // strip '+' and spaces
+  return `${digitsOnly}@bookmyroom.local`;
+}
+
 // POST /api/auth/register
 // Guests register with mobile number + password + full name.
 // Uses the Supabase Admin API (service role) to create the user directly
-// with phone_confirm: true, so no SMS/OTP provider is required.
-// The 'handle_new_user' DB trigger auto-creates the matching profiles row.
+// with email_confirm: true, so no SMS/OTP or email provider is required.
+// The 'handle_new_user' DB trigger auto-creates the matching profiles row,
+// reading mobile_number from user_metadata.
 router.post('/register', async (req, res) => {
   const { mobile_number, password, full_name } = req.body;
 
@@ -16,13 +28,19 @@ router.post('/register', async (req, res) => {
   }
 
   const { data, error } = await supabase.auth.admin.createUser({
-    phone: mobile_number,
+    email: mobileToSyntheticEmail(mobile_number),
     password,
-    phone_confirm: true,
+    email_confirm: true,
     user_metadata: { full_name, mobile_number }
   });
 
-  if (error) return res.status(400).json({ error: error.message });
+  if (error) {
+    // Supabase returns a generic "already registered" message for duplicate emails
+    if (error.message.toLowerCase().includes('already') ) {
+      return res.status(400).json({ error: 'This mobile number is already registered.' });
+    }
+    return res.status(400).json({ error: error.message });
+  }
 
   res.status(201).json({
     message: 'Registration successful. You can now log in.',
@@ -33,11 +51,12 @@ router.post('/register', async (req, res) => {
 export default router;
 
 // NOTE ON LOGIN:
-// Login does NOT need a backend route. The frontend calls Supabase directly
+// Login does NOT need a backend route. The frontend converts the mobile
+// number to the same synthetic email format and calls Supabase directly
 // using the public anon key:
 //
 //   const { data, error } = await supabase.auth.signInWithPassword({
-//     phone: mobileNumber,
+//     email: `${digitsOnly}@bookmyroom.local`,
 //     password: password
 //   });
 //

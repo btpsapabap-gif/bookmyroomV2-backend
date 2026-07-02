@@ -12,7 +12,10 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-app.use(cors({ origin: process.env.FRONTEND_URL || '*' }));
+// Trim any trailing slash so "https://x.vercel.app/" in the env var
+// still matches the browser's origin "https://x.vercel.app" exactly.
+const allowedOrigin = (process.env.FRONTEND_URL || '*').replace(/\/+$/, '');
+app.use(cors({ origin: allowedOrigin }));
 app.use(express.json());
 
 app.get('/', (req, res) => res.json({ status: 'BookMyRoom API is running' }));
