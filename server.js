@@ -6,6 +6,7 @@ import authRoutes from './routes/auth.js';
 import roomsRoutes from './routes/rooms.js';
 import bookingsRoutes from './routes/bookings.js';
 import reportsRoutes from './routes/reports.js';
+import guestsRoutes from './routes/guests.js';
 
 dotenv.config();
 
@@ -24,6 +25,7 @@ app.use('/api/auth', authRoutes);
 app.use('/api/rooms', roomsRoutes);
 app.use('/api/bookings', bookingsRoutes);
 app.use('/api/reports', reportsRoutes);
+app.use('/api/guests', guestsRoutes);
 
 app.listen(PORT, () => {
   console.log(`BookMyRoom API listening on port ${PORT}`);
