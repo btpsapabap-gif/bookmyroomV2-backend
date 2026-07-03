@@ -1,64 +1,98 @@
 import express from 'express';
+import bcrypt from 'bcryptjs';
+import jwt from 'jsonwebtoken';
 import { supabase } from '../supabaseClient.js';
 
 const router = express.Router();
 
-// We use mobile number as the login identifier, but Supabase's Phone auth
-// provider requires a paid SMS provider (Twilio) to even be enabled, even
-// though we never send an OTP. To avoid that dependency entirely, we store
-// each user under a synthetic email derived from their mobile number and
-// use Supabase's normal EMAIL auth under the hood. Users never see this —
-// they only ever type their mobile number.
-function mobileToSyntheticEmail(mobileNumber) {
-  const digitsOnly = mobileNumber.replace(/[^\d]/g, ''); // strip '+' and spaces
-  return `${digitsOnly}@bookmyroom.local`;
-}
-
 // POST /api/auth/register
-// Guests register with mobile number + password + full name.
-// Uses the Supabase Admin API (service role) to create the user directly
-// with email_confirm: true, so no SMS/OTP or email provider is required.
-// The 'handle_new_user' DB trigger auto-creates the matching profiles row,
-// reading mobile_number from user_metadata.
+// Checks for a duplicate mobile number directly against the profiles
+// table, hashes the password, and inserts a new guest row.
 router.post('/register', async (req, res) => {
   const { mobile_number, password, full_name } = req.body;
 
   if (!mobile_number || !password || !full_name) {
     return res.status(400).json({ error: 'mobile_number, password and full_name are required' });
   }
-
-  const { data, error } = await supabase.auth.admin.createUser({
-    email: mobileToSyntheticEmail(mobile_number),
-    password,
-    email_confirm: true,
-    user_metadata: { full_name, mobile_number }
-  });
-
-  if (error) {
-    // Supabase returns a generic "already registered" message for duplicate emails
-    if (error.message.toLowerCase().includes('already') ) {
-      return res.status(400).json({ error: 'This mobile number is already registered.' });
-    }
-    return res.status(400).json({ error: error.message });
+  if (password.length < 6) {
+    return res.status(400).json({ error: 'Password must be at least 6 characters' });
   }
 
-  res.status(201).json({
-    message: 'Registration successful. You can now log in.',
-    user_id: data.user.id
+  // Duplicate check
+  const { data: existing } = await supabase
+    .from('profiles')
+    .select('id')
+    .eq('mobile_number', mobile_number)
+    .maybeSingle();
+
+  if (existing) {
+    return res.status(409).json({ error: 'This mobile number is already registered.' });
+  }
+
+  const password_hash = await bcrypt.hash(password, 10);
+
+  const { data, error } = await supabase
+    .from('profiles')
+    .insert([{ full_name, mobile_number, password_hash, role: 'guest' }])
+    .select('id, full_name, mobile_number, role')
+    .single();
+
+  if (error) return res.status(400).json({ error: error.message });
+
+  res.status(201).json({ message: 'Registration successful. You can now log in.', profile: data });
+});
+
+// POST /api/auth/login
+// Verifies mobile number + password against the stored hash and
+// returns a signed JWT the frontend attaches to future requests.
+router.post('/login', async (req, res) => {
+  const { mobile_number, password } = req.body;
+
+  if (!mobile_number || !password) {
+    return res.status(400).json({ error: 'mobile_number and password are required' });
+  }
+
+  const { data: profile, error } = await supabase
+    .from('profiles')
+    .select('*')
+    .eq('mobile_number', mobile_number)
+    .maybeSingle();
+
+  if (error || !profile) {
+    return res.status(401).json({ error: 'Incorrect mobile number or password.' });
+  }
+
+  const passwordMatches = await bcrypt.compare(password, profile.password_hash);
+  if (!passwordMatches) {
+    return res.status(401).json({ error: 'Incorrect mobile number or password.' });
+  }
+
+  const token = jwt.sign(
+    { id: profile.id, full_name: profile.full_name, mobile_number: profile.mobile_number, role: profile.role },
+    process.env.JWT_SECRET,
+    { expiresIn: '7d' }
+  );
+
+  res.json({
+    token,
+    profile: { id: profile.id, full_name: profile.full_name, mobile_number: profile.mobile_number, role: profile.role }
   });
 });
 
-export default router;
+// GET /api/auth/me
+// Returns the current user's profile based on the token. Used by the
+// frontend on page load to restore the session.
+router.get('/me', async (req, res) => {
+  const authHeader = req.headers.authorization || '';
+  const token = authHeader.replace('Bearer ', '');
+  if (!token) return res.status(401).json({ error: 'No token provided' });
 
-// NOTE ON LOGIN:
-// Login does NOT need a backend route. The frontend converts the mobile
-// number to the same synthetic email format and calls Supabase directly
-// using the public anon key:
-//
-//   const { data, error } = await supabase.auth.signInWithPassword({
-//     email: `${digitsOnly}@bookmyroom.local`,
-//     password: password
-//   });
-//
-// This returns a session/access_token which the frontend then sends as
-// "Authorization: Bearer <token>" on all requests to this backend.
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    res.json({ profile: decoded });
+  } catch {
+    res.status(401).json({ error: 'Invalid or expired token' });
+  }
+});
+
+export default router;

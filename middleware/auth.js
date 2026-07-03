@@ -1,37 +1,22 @@
-import { supabase } from '../supabaseClient.js';
+import jwt from 'jsonwebtoken';
 
-// Verifies the Supabase access token sent from the frontend
-// (Authorization: Bearer <token>) and attaches the user + profile
-// to the request object.
-export async function requireAuth(req, res, next) {
+// Verifies our own JWT (issued at login) and attaches the decoded
+// payload — { id, full_name, mobile_number, role } — to the request.
+export function requireAuth(req, res, next) {
+  const authHeader = req.headers.authorization || '';
+  const token = authHeader.replace('Bearer ', '');
+
+  if (!token) {
+    return res.status(401).json({ error: 'No auth token provided' });
+  }
+
   try {
-    const authHeader = req.headers.authorization || '';
-    const token = authHeader.replace('Bearer ', '');
-
-    if (!token) {
-      return res.status(401).json({ error: 'No auth token provided' });
-    }
-
-    const { data: { user }, error } = await supabase.auth.getUser(token);
-    if (error || !user) {
-      return res.status(401).json({ error: 'Invalid or expired token' });
-    }
-
-    const { data: profile, error: profileError } = await supabase
-      .from('profiles')
-      .select('*')
-      .eq('id', user.id)
-      .single();
-
-    if (profileError || !profile) {
-      return res.status(401).json({ error: 'Profile not found' });
-    }
-
-    req.user = user;
-    req.profile = profile;
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    req.user = decoded;
+    req.profile = decoded;
     next();
-  } catch (err) {
-    res.status(500).json({ error: 'Auth check failed', details: err.message });
+  } catch {
+    return res.status(401).json({ error: 'Invalid or expired token' });
   }
 }
 
